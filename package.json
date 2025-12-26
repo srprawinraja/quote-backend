@@ -1,11 +1,16 @@
 {
   "dependencies": {
     "dotenv": "^17.2.3",
+    "express": "^4.22.1",
     "express-rate-limit": "^8.2.1",
     "firebase": "^12.7.0",
     "firebase-admin": "^13.6.0"
   },
   "devDependencies": {
     "@typescript-eslint/parser": "^8.50.1"
+  },
+  "scripts": {
+    "start": "node functions/index.js",
+    "dev": "nodemon functions/index.js"
   }
 }
