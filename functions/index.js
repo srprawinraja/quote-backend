@@ -1,245 +1,159 @@
-import * as functions from "firebase-functions";
+import express from "express";
 import admin from "firebase-admin";
-
 import dotenv from "dotenv";
 import crypto from "crypto";
 import rateLimit from "express-rate-limit";
 
-dotenv.config();
-
-import { initializeApp } from "firebase/app";
-import {
-  getFirestore,
-  collection,
-  getDocs,
-  query,
-  where,
-  doc,
-  setDoc,
-  addDoc,
-} from "firebase/firestore";
 
 
-const firebaseConfig = {
-  apiKey: process.env.API_KEY,
-  authDomain: process.env.AUTH_DOMAIN,
-  projectId: process.env.PROJECT_ID,
-  storageBucket: process.env.STORAGE_BUCKET,
-  messagingSenderId: process.env.MESSAGING_SENDER_ID,
-};
+dotenv.config({ path: "./secret.env" });
+dotenv.config({ path: "./firebaseconfig.env" });
 
 
-const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
 
-dotenv.config({ path: "../secret.env" });
+// Initialize Firebase Admin SDK
+admin.initializeApp({
+  credential: admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)),
+});
 
-// Now you can access your secrets
-const apikey = process.env.KEY;
+const db = admin.firestore();
 
+// Rate limiter
 const limiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 60, // 60 requests
+  windowMs: 60 * 1000,
+  max: 60,
   standardHeaders: true,
   legacyHeaders: false,
-  handler: (req, res) => {
-    res.status(429).json({ error: "Too many requests, slow down!" });
-  },
+  handler: (req, res) => res.status(429).json({ error: "Too many requests, slow down!" }),
 });
 
+// Helper function
 function quoteIdFromText(quote) {
-  return crypto
-    .createHash("sha256")
-    .update(quote.trim().toLowerCase())
-    .digest("hex");
+  return crypto.createHash("sha256").update(quote.trim().toLowerCase()).digest("hex");
 }
-export const random = functions.https.onRequest(limiter, async (req, res) => {
-  if (req.method !== "GET") return res.status(405).send("Method Not Allowed");
-  const reqApiKey = req.header("x-api-key"); // or req.headers['x-api-key']
-  if (!reqApiKey || reqApiKey !== apikey) {
-    return res.status(401).send("Invalid token");
+
+// API key check middleware
+function checkApiKey(req, res, next) {
+  const reqApiKey = req.header("x-api-key");
+  if (!reqApiKey || reqApiKey !== process.env.KEY) {
+    return res.status(401).json({ error: "Invalid API key" });
   }
+  next();
+}
 
-  // continue with your function logic
+// Initialize Express app
+const app = express();
+app.use(express.json()); // for parsing JSON bodies
 
-  const slug = req.query.slug;
-  if (slug) {
-    const quotesCol = collection(db, "quotes");
+// ----- ROUTES -----
 
-    // Build the query
-    const q = query(quotesCol, where("slugs", "array-contains", slug));
+// GET /random
+app.get("/random", limiter, checkApiKey, async (req, res) => {
+  try {
+    const slug = req.query.slug;
+    const quotesCol = db.collection("quotes");
 
-    // Execute the query
-    const quotesSnapshot = await getDocs(q);
+    if (slug) {
+      const q = quotesCol.where("slugs", "array-contains", slug);
+      const snapshot = await q.get();
 
-    if (quotesSnapshot.empty) {
-      return res.status(200).json({ error: "No quotes found" });
+      if (snapshot.empty) return res.status(200).json({ error: "No quotes found" });
+
+      const quotesArray = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      const randomQuote = quotesArray[Math.floor(Math.random() * quotesArray.length)];
+
+      const tag = slug
+        .split("-")
+        .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+
+      return res.json({ ...randomQuote, slug, tag });
     }
 
-    // Convert snapshot to array
-    const quotesArray = quotesSnapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
+    // No slug: get a random quote from all
+    const snapshot = await quotesCol.get();
+    if (snapshot.empty) return res.status(404).json({ error: "No quotes found" });
 
-    // Pick a random quote
-    const randomQuote =
-      quotesArray[Math.floor(Math.random() * quotesArray.length)];
+    const quotes = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    const randomQuote = quotes[Math.floor(Math.random() * quotes.length)];
 
-    const tag = slug
+    const selectedSlug = randomQuote.slugs[Math.floor(Math.random() * randomQuote.slugs.length)];
+    const tag = selectedSlug
       .split("-")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+      .map(w => w.charAt(0).toUpperCase() + w.slice(1))
       .join(" ");
 
-    return res.status(200).json({
-      id: randomQuote.id,
-      author: randomQuote.author,
-      quote: randomQuote.quote,
-      slug: slug,
-      tag: tag,
-    });
+    return res.json({ ...randomQuote, slug: selectedSlug, tag });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   }
-
-  const quotesCol = collection(db, "quotes");
-
-  // Fetch all documents
-  const querySnapshot = await getDocs(quotesCol);
-  if (querySnapshot.empty) {
-    return res.status(404).json({ error: "No quotes found" });
-  }
-  // Convert documents to array
-  const quotes = querySnapshot.docs.map((doc) => ({
-    id: doc.id,
-    ...doc.data(),
-  }));
-
-  // Get one random quote
-  const randomQuote = quotes[Math.floor(Math.random() * quotes.length)];
-
-  const selectedSlug =
-    randomQuote.slugs[Math.floor(Math.random() * randomQuote.slugs.length)];
-
-  const tag = selectedSlug
-    .split("-")
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(" ");
-
-  return res.status(200).json({
-    id: randomQuote.id,
-    author: randomQuote.author,
-    quote: randomQuote.quote,
-    slug: selectedSlug,
-    tag: tag,
-  });
 });
 
-export const quote = functions.https.onRequest(limiter, async (req, res) => {
+// POST /quote
+app.post("/quote", checkApiKey, async (req, res) => {
   try {
-    if (req.method !== "POST")
-      return res.status(405).send("Method Not Allowed");
+    const { author, quote, slugs } = req.body;
 
-    const reqApiKey = req.header("x-api-key"); // or req.headers['x-api-key']
-    if (!reqApiKey || reqApiKey !== apikey) {
-      return res.status(401).send("Invalid token");
+    if (!author || !quote || !slugs || !Array.isArray(slugs) || slugs.length === 0) {
+      return res.status(400).json({ error: "Missing or invalid params" });
     }
-    const author = req.body.author;
-    const quote = req.body.quote;
-    const slugs = req.body.slugs;
-    if (
-      !quote ||
-      !author ||
-      !slugs ||
-      !Array.isArray(slugs) ||
-      slugs.length === 0
-    ) {
-      return res.status(400).send("params missing or invalid");
-    }
+
     const validSlugs = [];
     const chunkSize = 10;
 
-    // Split slugs into chunks of 10
     for (let i = 0; i < slugs.length; i += chunkSize) {
       const chunk = slugs.slice(i, i + chunkSize);
-      const tagsCol = collection(db, "tags");
+      const tagsCol = db.collection("tags");
+      const q = tagsCol.where("slug", "in", chunk);
+      const snapshot = await q.get();
 
-      // Build the query
-      const q = query(tagsCol, where("slug", "in", chunk));
-
-      // Execute the query
-      const querySnapshot = await getDocs(q);
-
-      querySnapshot.forEach((doc) => {
-        validSlugs.push(doc.data().slug);
-      });
+      snapshot.forEach(doc => validSlugs.push(doc.data().slug));
     }
 
-    if (validSlugs.length === 0) {
-      return res.status(404).send({ message: "No valid tags found" });
-    }
-    const docRef = doc(db, "quotes", quoteIdFromText(quote));
+    if (validSlugs.length === 0) return res.status(404).json({ error: "No valid tags found" });
 
-    // Set the document data
-    await setDoc(docRef, {
-      author: author,
-      quote: quote,
-      slugs: validSlugs,
-    });
-    console.log("Document written with ID:", docRef.id);
-    res.send(`Document written with ID: ${docRef.id}`);
-  } catch (e) {
-    console.error("Error adding document: ", e);
-    res.status(500).send("Error adding document");
+    const docRef = db.collection("quotes").doc(quoteIdFromText(quote));
+    await docRef.set({ author, quote, slugs: validSlugs });
+
+    res.json({ message: "Quote added", id: docRef.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-export const tags = functions.https.onRequest(limiter, async (req, res) => {
-  if (req.method === "GET") {
-    if (req.method !== "GET") return res.status(405).send("Method Not Allowed");
-    const reqApiKey = req.header("x-api-key"); // or req.headers['x-api-key']
-    if (!reqApiKey || reqApiKey !== apikey) {
-      return res.status(401).send("Invalid token");
-    }
-    const tagsCol = collection(db, "tags");
-
-    // Fetch all documents
-    const querySnapshot = await getDocs(tagsCol);
-    // Convert documents to array of objects
-    const tags = querySnapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    return res.status(200).json(tags);
-  }
-});
-
-export const tag = functions.https.onRequest(limiter, async (req, res) => {
+// GET /tags
+app.get("/tags", limiter, checkApiKey, async (req, res) => {
   try {
-    if (req.method !== "POST")
-      return res.status(405).send("Method Not Allowed");
-    const reqApiKey = req.header("x-api-key"); // or req.headers['x-api-key']
-    if (!reqApiKey || reqApiKey !== apikey) {
-      return res.status(401).send("Invalid token");
-    }
-    const tag = req.body.tag;
-    const slug = req.body.slug;
-    const img = req.body.img;
-
-    if (!tag || !slug || !img) {
-      return res.status(405).send("params missing");
-    }
-    const tagsCol = collection(db, "tags");
-
-    // Add a new document with auto-generated ID
-    const docRef = await addDoc(tagsCol, {
-      tag: tag,
-      slug: slug,
-      img: img,
-    });
-    console.log("Document written with ID:", docRef.id);
-    res.send(`Document written with ID: ${docRef.id}`);
-  } catch (e) {
-    console.error("Error adding document: ", e);
-    res.status(500).send("Error adding document");
+    const tagsCol = db.collection("tags");
+    const snapshot = await tagsCol.get();
+    const tags = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+    res.json(tags);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
   }
 });
+
+// POST /tag
+app.post("/tag", limiter, checkApiKey, async (req, res) => {
+  try {
+    const { tag, slug, img } = req.body;
+    if (!tag || !slug || !img) return res.status(400).json({ error: "Missing params" });
+
+    const docRef = await db.collection("tags").add({ tag, slug, img });
+    res.json({ message: "Tag added", id: docRef.id });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+app.get("/health", (req, res) => {
+  res.send("works fine");
+});
+
+
+// Start server
+const PORT = process.env.PORT || 4000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
